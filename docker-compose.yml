@@ -1,0 +1,107 @@
+services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "${NGINX_HTTP_PORT}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - static_data:/data/static:ro
+      - media_data:/data/media:ro
+      - frontend_data:/data/frontend:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    image: ecintelligence/yonder:${YONDER_VERSION:-latest}
+    network_mode: host
+    cap_add:
+      - NET_RAW
+    env_file: .env
+    volumes:
+      - static_data:/data/static
+      - media_data:/data/media
+      - frontend_data:/data/frontend
+      - /proc:/host/proc:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${GUNICORN_PORT}/api/v1/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  celery-worker:
+    image: ecintelligence/yonder:${YONDER_VERSION:-latest}
+    network_mode: host
+    cap_add:
+      - NET_RAW
+    command: ["celery", "-A", "yonder_platform", "worker", "-Q", "default", "--loglevel=info", "--concurrency=${CELERY_CONCURRENCY}"]
+    env_file: .env
+    volumes:
+      - /proc:/host/proc:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  celery-worker-conversion:
+    image: ecintelligence/yonder-conversion:${YONDER_VERSION:-latest}
+    network_mode: host
+    command: ["celery", "-A", "yonder_platform", "worker", "-Q", "conversion", "--loglevel=info", "--concurrency=${CELERY_CONVERSION_CONCURRENCY:-1}"]
+    env_file: .env
+    environment:
+      MIGRATION_TEMP_ROOT: /mnt/migration_temp
+    volumes:
+      - /proc:/host/proc:ro
+      - migration_temp:/mnt/migration_temp
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  celery-beat:
+    image: ecintelligence/yonder:${YONDER_VERSION:-latest}
+    network_mode: host
+    command: ["celery", "-A", "yonder_platform", "beat", "--loglevel=info", "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
+    env_file: .env
+    volumes:
+      - /proc:/host/proc:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  db:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  redis_data:
+  static_data:
+  media_data:
+  frontend_data:
+  migration_temp:
